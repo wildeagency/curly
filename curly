@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# curly — a curl wrapper that reads a YAML service registry.
+# https://github.com/wildeagency/curly
+#
+# Usage: curly <service> <path> [curl-args...]
+#        curly services       # list services from ~/.curly.yaml
+#        curly doctor         # check deps, config, and token status
+#
+# Reads ~/.curly.yaml (service registry) and ~/.curly.env (tokens).
+# Requires: curl, yq (v4), jq.
+
+set -euo pipefail
+
+YAML="${CURLY_YAML:-$HOME/.curly.yaml}"
+ENV_FILE="${CURLY_ENV_FILE:-$HOME/.curly.env}"
+
+# Load tokens into the environment so YAML refs like ${MY_TOKEN} resolve.
+# shellcheck disable=SC1090,SC1091
+[ -f "$ENV_FILE"    ] && set -a && . "$ENV_FILE"    && set +a
+# shellcheck disable=SC1091
+[ -f "./.curly.env" ] && set -a && . "./.curly.env" && set +a
+
+# Expand ${VAR} / ${VAR:-default} in a string. Trusted config: rejects
+# backticks and $() so a YAML value can't run commands.
+expand() {
+  # shellcheck disable=SC2016
+  case "$1" in *'`'*|*'$('*) echo "curly: unsafe value: $1" >&2; exit 1 ;; esac
+  local _u=0; case $- in *u*) _u=1; set +u ;; esac
+  eval "printf '%s' \"$1\""
+  [ "$_u" = 1 ] && set -u
+}
+
+# ─── Subcommands ────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+  ""|-h|--help)
+    sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+
+  services)
+    yq -r '.services | to_entries[] | .key + "\t" + (.value.host // "")' "$YAML" |
+      awk -F'\t' '{ printf "  %-12s %s\n", $1, $2 }'
+    exit 0 ;;
+
+  doctor)
+    for d in curl yq jq; do
+      command -v "$d" >/dev/null || { echo "✗ $d missing (brew install $d)"; exit 1; }
+    done
+    echo "✓ deps: curl yq jq"
+    if [ -f "$YAML" ];     then echo "✓ yaml: $YAML";     else echo "✗ yaml: $YAML missing";     exit 1; fi
+    if [ -f "$ENV_FILE" ]; then echo "✓ env:  $ENV_FILE"; else echo "⚠ env:  $ENV_FILE not found";       fi
+    yq '.' "$YAML" >/dev/null || { echo "✗ yaml parse error"; exit 1; }
+    echo
+    while IFS=$'\t' read -r svc auth token; do
+      tok=$(expand "$token")
+      case "$auth" in
+        none)  state="ok" ;;
+        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN" ;; *) state="ok" ;; esac ;;
+        *)     [ -z "$tok" ] && state="MISSING TOKEN" || state="ok" ;;
+      esac
+      printf "  %-12s %-7s %s\n" "$svc" "$auth" "$state"
+    done < <(yq -r '.services | to_entries[] |
+      .key + "\t" + (.value.auth // "none") + "\t" + (.value.token // "")' "$YAML")
+    exit 0 ;;
+esac
+
+# ─── Request path: curly <service> <path> [curl-args...] ────────────────────
+
+[ $# -ge 2 ] || { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 1; }
+
+SERVICE=$1
+REQ_PATH=$2
+shift 2
+
+[ -f "$YAML" ] || { echo "curly: $YAML not found (run: curly doctor)" >&2; exit 1; }
+
+# Pull this service's entry from the YAML as JSON, then read fields with jq.
+ENTRY=$(yq -o=json ".services.\"$SERVICE\" // null" "$YAML")
+[ "$ENTRY" = "null" ] && {
+  echo "curly: unknown service '$SERVICE'" >&2
+  echo "  Available: $(yq -r '.services | keys | join(" ")' "$YAML")" >&2
+  exit 1
+}
+
+HOST=$(expand "$(jq -r '.host        // ""'    <<<"$ENTRY")")
+TOKEN=$(expand "$(jq -r '.token       // ""'   <<<"$ENTRY")")
+AUTH=$(jq -r        '.auth        // "none"'    <<<"$ENTRY")
+AUTH_HEADER=$(jq -r '.auth_header // ""'        <<<"$ENTRY")
+USER_AGENT=$(expand "$(jq -r '.user_agent // ""' <<<"$ENTRY")")
+
+# Leading "/" optional, but pass through @refs and "?query".
+case "$REQ_PATH" in /*|@*|\?*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
+
+# ─── Build curl args ────────────────────────────────────────────────────────
+
+CURL=(-s)
+[ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
+
+case "$AUTH" in
+  none)   ;;
+  bearer) [ -n "$TOKEN" ] || { echo "curly: no token for '$SERVICE' (set in $ENV_FILE)" >&2; exit 1; }
+          CURL+=(-H "Authorization: Bearer $TOKEN") ;;
+  basic)  case "$TOKEN" in ""|:*|*:) echo "curly: '$SERVICE' needs user:pass in token" >&2; exit 1 ;; esac
+          CURL+=(-u "$TOKEN") ;;
+  header) [ -n "$TOKEN"       ] || { echo "curly: no token for '$SERVICE'" >&2; exit 1; }
+          [ -n "$AUTH_HEADER" ] || { echo "curly: '$SERVICE' auth=header needs auth_header" >&2; exit 1; }
+          CURL+=(-H "$AUTH_HEADER: $TOKEN") ;;
+  cookie) [ -n "$TOKEN" ] || { echo "curly: no cookie for '$SERVICE'" >&2; exit 1; }
+          CURL+=(-H "Cookie: $TOKEN") ;;
+  *)      echo "curly: '$SERVICE' has unknown auth '$AUTH'" >&2; exit 1 ;;
+esac
+
+# Static headers from the YAML's .headers map. Empty values get dropped.
+while IFS=$'\t' read -r name value; do
+  [ -z "$name" ] && continue
+  value=$(expand "$value")
+  [ -n "$value" ] && CURL+=(-H "$name: $value")
+done < <(jq -r '.headers // {} | to_entries[] | .key + "\t" + .value' <<<"$ENTRY")
+
+# Auto Content-Type when the caller sends a JSON body.
+for a in "$@"; do
+  case "$a" in -d|--data|--data-raw|--data-binary|--json)
+    CURL+=(-H "Content-Type: application/json"); break ;;
+  esac
+done
+
+exec curl "${CURL[@]}" "${HOST}${REQ_PATH}" "$@"
