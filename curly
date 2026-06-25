@@ -87,8 +87,11 @@ AUTH=$(jq -r        '.auth        // "none"'    <<<"$ENTRY")
 AUTH_HEADER=$(jq -r '.auth_header // ""'        <<<"$ENTRY")
 USER_AGENT=$(expand "$(jq -r '.user_agent // ""' <<<"$ENTRY")")
 
-# Leading "/" optional, but pass through @refs and "?query".
-case "$REQ_PATH" in /*|@*|\?*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
+# Leading "/" is optional — always prepend if missing. This includes @refs
+# like "@protocol/foo" (which become "/@protocol/foo"), otherwise curl
+# concatenates host+path with no separator and parses "host@path" as URL
+# userinfo, producing "Could not resolve host" errors.
+case "$REQ_PATH" in /*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
 
 # ─── Build curl args ────────────────────────────────────────────────────────
 
