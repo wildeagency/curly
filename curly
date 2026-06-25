@@ -6,19 +6,12 @@
 #        curly services       # list services from ~/.curly.yaml
 #        curly doctor         # check deps, config, and token status
 #
-# Reads ~/.curly.yaml (service registry) and ~/.curly.env (tokens).
+# Reads ~/.curly.yaml. Tokens live in the YAML — keep it chmod 600.
 # Requires: curl, yq (v4), jq.
 
 set -euo pipefail
 
 YAML="${CURLY_YAML:-$HOME/.curly.yaml}"
-ENV_FILE="${CURLY_ENV_FILE:-$HOME/.curly.env}"
-
-# Load tokens into the environment so YAML refs like ${MY_TOKEN} resolve.
-# shellcheck disable=SC1090,SC1091
-[ -f "$ENV_FILE"    ] && set -a && . "$ENV_FILE"    && set +a
-# shellcheck disable=SC1091
-[ -f "./.curly.env" ] && set -a && . "./.curly.env" && set +a
 
 # Expand ${VAR} / ${VAR:-default} in a string. Trusted config: rejects
 # backticks and $() so a YAML value can't run commands.
@@ -46,16 +39,22 @@ case "${1:-}" in
       command -v "$d" >/dev/null || { echo "✗ $d missing (brew install $d)"; exit 1; }
     done
     echo "✓ deps: curl yq jq"
-    if [ -f "$YAML" ];     then echo "✓ yaml: $YAML";     else echo "✗ yaml: $YAML missing";     exit 1; fi
-    if [ -f "$ENV_FILE" ]; then echo "✓ env:  $ENV_FILE"; else echo "⚠ env:  $ENV_FILE not found";       fi
+    if [ -f "$YAML" ]; then
+      echo "✓ yaml: $YAML"
+      perms=$(stat -f '%Lp' "$YAML" 2>/dev/null || stat -c '%a' "$YAML" 2>/dev/null)
+      case "$perms" in 600|400) ;; *) echo "  ⚠ permissions are $perms — your tokens are world-readable. Run: chmod 600 $YAML" ;; esac
+    else
+      echo "✗ yaml: $YAML missing — see github.com/wildeagency/curly for the starter file"
+      exit 1
+    fi
     yq '.' "$YAML" >/dev/null || { echo "✗ yaml parse error"; exit 1; }
     echo
     while IFS=$'\t' read -r svc auth token; do
       tok=$(expand "$token")
       case "$auth" in
         none)  state="ok" ;;
-        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN" ;; *) state="ok" ;; esac ;;
-        *)     [ -z "$tok" ] && state="MISSING TOKEN" || state="ok" ;;
+        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN — edit token: under services.$svc in $YAML" ;; *) state="ok" ;; esac ;;
+        *)     [ -z "$tok" ] && state="MISSING TOKEN — edit token: under services.$svc in $YAML" || state="ok" ;;
       esac
       printf "  %-12s %-7s %s\n" "$svc" "$auth" "$state"
     done < <(yq -r '.services | to_entries[] |
@@ -98,16 +97,18 @@ case "$REQ_PATH" in /*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
 CURL=(-s)
 [ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
 
+no_token() { echo "curly: no token for '$SERVICE' — edit services.$SERVICE.token in $YAML" >&2; exit 1; }
+
 case "$AUTH" in
   none)   ;;
-  bearer) [ -n "$TOKEN" ] || { echo "curly: no token for '$SERVICE' (set in $ENV_FILE)" >&2; exit 1; }
+  bearer) [ -n "$TOKEN" ] || no_token
           CURL+=(-H "Authorization: Bearer $TOKEN") ;;
   basic)  case "$TOKEN" in ""|:*|*:) echo "curly: '$SERVICE' needs user:pass in token" >&2; exit 1 ;; esac
           CURL+=(-u "$TOKEN") ;;
-  header) [ -n "$TOKEN"       ] || { echo "curly: no token for '$SERVICE'" >&2; exit 1; }
+  header) [ -n "$TOKEN"       ] || no_token
           [ -n "$AUTH_HEADER" ] || { echo "curly: '$SERVICE' auth=header needs auth_header" >&2; exit 1; }
           CURL+=(-H "$AUTH_HEADER: $TOKEN") ;;
-  cookie) [ -n "$TOKEN" ] || { echo "curly: no cookie for '$SERVICE'" >&2; exit 1; }
+  cookie) [ -n "$TOKEN" ] || no_token
           CURL+=(-H "Cookie: $TOKEN") ;;
   *)      echo "curly: '$SERVICE' has unknown auth '$AUTH'" >&2; exit 1 ;;
 esac

@@ -1,95 +1,96 @@
-# curly service registry — safe to commit. Tokens live in ~/.curly.env.
-# Copy to ~/.curly.yaml and edit. See README for the full schema.
+# curly service registry. Paste your real tokens below and chmod 600 the file.
+#
+# Sharing? Replace each `token:` value with `REDACTED` before sending.
+# Power-user escape hatch: `token: ${MY_VAR}` reads the value from your env
+# instead. Useful with 1Password CLI, `op run`, aws-vault, etc.
+#
+# Copy this file to ~/.curly.yaml and run `curly doctor`.
 
 services:
 
-  # ── Bearer (the common case) ────────────────────────────────────────────
+  # ── protocol.supply ─────────────────────────────────────────────────────
   protocol:
     host: https://api.protocol.supply
-    token: ${PROTOCOL_TOKEN}
+    token: tok_xxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
     headers:
-      # Header is dropped automatically when ${PROTOCOL_USER_ID} is empty.
-      X-Ghost-User-Id: ${PROTOCOL_USER_ID}
+      # Optional — drop the line if you don't use ghost-auth.
+      X-Ghost-User-Id: user_xxxxxxxxxxxxxxxxxxxxxxxx
 
+  # ── Notion ──────────────────────────────────────────────────────────────
   notion:
     host: https://api.notion.com/v1
-    token: ${NOTION_TOKEN}
+    token: ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
     headers:
       Notion-Version: '2026-03-11'
 
+  # ── GitHub ──────────────────────────────────────────────────────────────
   gh:
     host: https://api.github.com
-    token: ${GH_TOKEN}
+    token: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
     headers:
       X-GitHub-Api-Version: '2022-11-28'
 
-  apify:
-    host: https://api.apify.com/v2
-    token: ${APIFY_TOKEN}
-    auth: bearer
-
+  # ── Slack ───────────────────────────────────────────────────────────────
   slack:
     host: https://slack.com/api
-    token: ${SLACK_TOKEN}
+    token: xoxb-xxxxxxxxxxxx-xxxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
 
+  # ── Linear ──────────────────────────────────────────────────────────────
   linear:
     host: https://api.linear.app
-    token: ${LINEAR_API_KEY}
+    token: lin_api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
 
+  # ── Airtable ────────────────────────────────────────────────────────────
   airtable:
     host: https://api.airtable.com
-    token: ${AIRTABLE_TOKEN}
+    token: patxxxxxxxxxxxxxx.yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
     auth: bearer
 
+  # ── PostHog (US cloud default; change host for EU/self-hosted) ──────────
   posthog:
-    host: ${POSTHOG_HOST:-https://us.posthog.com}
-    token: ${POSTHOG_TOKEN}
+    host: https://us.posthog.com
+    token: phx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: bearer
 
-  wilde:
-    host: https://api.wilde.agency
-    token: ${WILDE_TOKEN}
-    auth: bearer
-
-  # ── Non-Bearer header auth ──────────────────────────────────────────────
+  # ── n8n (self-hosted; change host) ──────────────────────────────────────
   n8n:
-    host: ${N8N_HOST:-http://localhost:5678/api/v1}
-    token: ${N8N_API_KEY}
+    host: http://localhost:5678/api/v1
+    token: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     auth: header
     auth_header: X-N8N-API-KEY
 
-  # ClickUp takes the token RAW in Authorization (NOT Bearer — returns OAUTH_019).
+  # ── ClickUp (raw token in Authorization, NOT Bearer) ────────────────────
   clickup:
     host: https://api.clickup.com/api/v2
-    token: ${CLICKUP_TOKEN}
+    token: pk_xxxxxxxxx_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
     auth: header
     auth_header: Authorization
 
-  # ── Basic auth (literal user "api" + key) ───────────────────────────────
+  # ── Mailgun (HTTP basic; literal user "api") ────────────────────────────
   mailgun:
     host: https://api.mailgun.net/v3
-    token: 'api:${MAILGUN_API_KEY}'
+    token: 'api:key-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
     auth: basic
 
-  # ── Cookie auth (full name=value pair from a logged-in browser) ─────────
+  # ── Luma (lu.ma; full name=value cookie from a logged-in browser) ───────
   luma:
     host: https://api.lu.ma
-    token: ${LUMA_AUTH_COOKIE}
+    token: 'luma.auth-session-key=usr-xxxxxxxxxxxxxxxx'
     auth: cookie
     user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-  # Anonymous luma reads (no cookie). Use this entry when you don't have one.
+  # Anonymous luma reads (no cookie). Use this when you don't have one.
   luma-anon:
     host: https://api.lu.ma
     auth: none
     user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-  # ── Token baked into URL (telegram) ─────────────────────────────────────
+  # ── Telegram Bot API ────────────────────────────────────────────────────
   telegram:
-    host: 'https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}'
+    host: 'https://api.telegram.org/bot1234567890:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
     auth: none
