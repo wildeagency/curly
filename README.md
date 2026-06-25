@@ -10,7 +10,7 @@ curl -H "Authorization: Bearer sk-live-7f3a..." https://api.example.com/v1/users
 #                                  → screen-share leak
 ```
 
-`curly` is a ~130-line bash script that wraps `curl` with a YAML service registry. Tokens live in the YAML (chmod 600, never in your command line). One file, one place to edit.
+`curly` is a ~130-line bash script that wraps `curl` with a YAML service registry. Tokens live in the YAML — kept private with `chmod 600` — and never appear on your command line. One file, one place to edit.
 
 ```bash
 curly gh /user
@@ -26,9 +26,9 @@ Single bash file. Three dependencies (`curl`, `yq`, `jq`). No daemon, no agent, 
 
 Open Claude Code or Codex CLI and paste:
 
-> "Install curly from github.com/wildeagency/curly. Ask me which APIs I want to set up, then ask me for each token one at a time and write them into ~/.curly.yaml. chmod 600 the file. Run `curly doctor` to verify."
+> "Install curly from github.com/wildeagency/curly. Ask me which APIs I want to set up, then ask me for each token one at a time and write them into ~/.curly.yaml. `chmod 600` the file. Run `curly doctor` to verify."
 
-The agent reads this README, drops the script, asks you which services you want (one of: Notion, GitHub, Slack, Linear, Airtable, Stripe, anything else), then asks for each token one at a time. You paste each token; the agent writes them into `~/.curly.yaml` directly. Five minutes start to finish.
+The agent reads this README, drops the script in `~/.local/bin/curly`, asks you which services you want (Notion, GitHub, Slack, Linear, Airtable, Stripe, anything else), then asks for each token one at a time. You paste each token; the agent writes them into `~/.curly.yaml` directly and `chmod 600`s the file so only you can read it. Five minutes start to finish.
 
 This is the same install everyone else does — just delegated to the agent that already lives in your terminal.
 
@@ -52,6 +52,8 @@ Edit `~/.curly.yaml`, replace the `xxx...` placeholders with your real tokens (d
 ```bash
 curly doctor
 ```
+
+`curly doctor` will warn you if the YAML's permissions are not `600` or `400` — your tokens are in this file, so it has to be readable only by you.
 
 ---
 
@@ -104,11 +106,33 @@ Worked examples in [`examples/curly.yaml`](examples/curly.yaml) cover every shap
 
 ---
 
+## Security
+
+`~/.curly.yaml` holds your tokens in cleartext. Two house rules:
+
+**`chmod 600 ~/.curly.yaml`.** Owner-only read/write. `curly doctor` checks this and warns if the file is world-readable. (The recommended install does it for you; do it yourself if you ran the manual install or edited the file with an editor that reset permissions.)
+
+**Don't commit it.** Add `.curly.yaml` to your global `.gitignore`:
+
+```bash
+git config --global core.excludesfile ~/.gitignore_global
+echo '.curly.yaml' >> ~/.gitignore_global
+```
+
+What `curly` does NOT protect against:
+
+- **`ps aux` leak.** While a request is in flight, the full bearer token shows up in the process list (it's a curl argument). Anyone else on the same machine — including processes running as your user — can grep for it. Same risk as raw curl. If this matters for your threat model, curl supports `-H @file` to read headers from disk; `curly` doesn't use that today.
+- **Backups / Time Machine.** If `~/.curly.yaml` is in your backup set, the tokens go with it. Exclude the file if that matters.
+
+What `curly` does protect against:
+
+- Tokens in your shell history (`~/.zsh_history` is `chmod 644` by default; `~/.curly.yaml` is `chmod 600`).
+- Tokens in your terminal scrollback / screen-share / Zoom recording.
+- Tokens pasted by accident when someone says "share your screen real quick."
+
 ## Sharing your config with a teammate
 
-`~/.curly.yaml` has your real tokens in it. Don't commit it.
-
-To share the *shape* (so your teammate can fill in their own tokens):
+To share the *shape* of your config (so your teammate can fill in their own tokens):
 
 ```bash
 sed 's/^\(\s*token:\).*/\1 REDACTED/' ~/.curly.yaml > curly-shape.yaml
