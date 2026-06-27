@@ -10,7 +10,7 @@ curl -H "Authorization: Bearer sk-live-7f3a..." https://api.example.com/v1/users
 #                                  → screen-share leak
 ```
 
-`curly` is a ~130-line bash script that wraps `curl` with a YAML service registry. Tokens live in the YAML — kept private with `chmod 600` — and never appear on your command line. One file, one place to edit.
+`curly` is a single bash script that wraps `curl` with a YAML service registry. Tokens live in the YAML — kept private with `chmod 600` — and never appear on your command line. One file, one place to edit.
 
 ```bash
 curly gh /user
@@ -106,6 +106,49 @@ Worked examples in [`examples/curly.yaml`](examples/curly.yaml) cover every shap
 
 ---
 
+## Project-local overrides
+
+`curly` reads a chain of `.curly.yaml` files and deep-merges them. Files closer to your current directory override files further away:
+
+1. `~/.curly.yaml` — your personal base (lowest precedence)
+2. Every `.curly.yaml` from `/` down to `$PWD` — each one overrides the previous
+
+So you can drop a `.curly.yaml` inside any project to point one service at a different host, swap a token, or add a project-only service. Everything else stays inherited from your home file.
+
+```yaml
+# ~/.curly.yaml
+services:
+  n8n:
+    host: https://n8n.prod.example.com
+    token: PROD_TOKEN
+    auth: header
+    auth_header: X-N8N-API-KEY
+```
+
+```yaml
+# ~/code/staging-tools/.curly.yaml — only what changes for this project
+services:
+  n8n:
+    host: http://localhost:5678/api/v1
+    token: LOCAL_DEV_TOKEN
+```
+
+Running `curly n8n /workflows` from inside `~/code/staging-tools/` (or any subdirectory) hits localhost with the dev token, while everywhere else still hits prod. `auth` and `auth_header` are inherited from home — you only restate the fields you're overriding. The merge is deep, so an override to `headers.X-Foo` keeps the rest of `headers` intact.
+
+`curly doctor` shows the full chain in precedence order so you can see exactly what's stacking:
+
+```
+✓ config sources (later overrides earlier):
+    /Users/me/.curly.yaml                       (perms: 600)
+    /Users/me/code/staging-tools/.curly.yaml    (perms: 600)
+```
+
+**One escape hatch.** Set `CURLY_YAML=/path/to/file.yaml` to bypass the chain entirely and read only that one file. Handy for `op run` / `aws-vault` flows that hand you a fully-rendered config.
+
+**`chmod 600` and gitignore.** Anywhere `.curly.yaml` lives, it can hold tokens. Same rules as the home file: `chmod 600`, and add `.curly.yaml` to your `.gitignore` (or global excludesfile). If you want to commit a shared shape for teammates, redact tokens first (see [Sharing your config with a teammate](#sharing-your-config-with-a-teammate)).
+
+---
+
 ## Security
 
 `~/.curly.yaml` holds your tokens in cleartext. Two house rules:
@@ -144,11 +187,12 @@ Send `curly-shape.yaml`. They paste their own tokens in.
 
 ## What's actually in the script
 
-[All 130 lines.](curly) The hot path is at the bottom and reads top-down:
+[Read the source.](curly) The hot path is at the bottom and reads top-down:
 
-1. Look up the service in `~/.curly.yaml` (one `yq` call → JSON, then `jq` for fields).
-2. Build a `curl` argv based on the `auth:` mode.
-3. `exec curl`.
+1. Discover every `.curly.yaml` in the chain (`$HOME` + ancestors of `$PWD`).
+2. Deep-merge them into a single JSON blob via `yq ea`.
+3. Look up the service, build a `curl` argv based on the `auth:` mode.
+4. `exec curl`.
 
 The subcommands (`services`, `doctor`) are a few lines each at the top, in a `case` statement.
 

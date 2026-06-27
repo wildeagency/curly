@@ -3,15 +3,24 @@
 # https://github.com/wildeagency/curly
 #
 # Usage: curly <service> <path> [curl-args...]
-#        curly services       # list services from ~/.curly.yaml
-#        curly doctor         # check deps, config, and token status
+#        curly services       # list services from the merged config
+#        curly doctor         # check deps, config sources, and token status
 #
-# Reads ~/.curly.yaml. Tokens live in the YAML — keep it chmod 600.
+# Config discovery (lowest → highest precedence, deep-merged):
+#   1. $HOME/.curly.yaml
+#   2. /.curly.yaml, /<dir>/.curly.yaml, …, $PWD/.curly.yaml
+# Closer-to-cwd files override $HOME and ancestors. Tokens in any of these
+# files — keep them chmod 600. Set $CURLY_YAML to use only that file
+# (skips the chain).
+#
 # Requires: curl, yq (v4), jq.
 
 set -euo pipefail
 
-YAML="${CURLY_YAML:-$HOME/.curly.yaml}"
+# Resolve $HOME through symlinks (e.g. macOS /var → /private/var) so the
+# dedup below matches what `pwd -P` produces during the ancestor walk.
+HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")
+HOME_YAML="$HOME_REAL/.curly.yaml"
 
 # Expand ${VAR} / ${VAR:-default} in a string. Trusted config: rejects
 # backticks and $() so a YAML value can't run commands.
@@ -23,6 +32,61 @@ expand() {
   [ "$_u" = 1 ] && set -u
 }
 
+# Discover .curly.yaml files in precedence order (lowest → highest).
+# Sets CONFIG_FILES array. Returns 1 if none found.
+discover_config_files() {
+  CONFIG_FILES=()
+
+  if [ -n "${CURLY_YAML:-}" ]; then
+    [ -f "$CURLY_YAML" ] || return 1
+    CONFIG_FILES=("$CURLY_YAML")
+    return 0
+  fi
+
+  [ -f "$HOME_YAML" ] && CONFIG_FILES+=("$HOME_YAML")
+
+  # Walk cwd → /, collecting ancestors, then read them root → cwd so closer
+  # files win the deep merge. Append-only on the array side keeps bash 3.2
+  # happy under `set -u` (empty `${arr[@]}` would otherwise be unbound).
+  local d f i
+  local ancestors=()
+  d=$(pwd -P)
+  while :; do
+    ancestors+=("$d")
+    [ "$d" = "/" ] && break
+    d=$(dirname "$d")
+  done
+
+  for ((i = ${#ancestors[@]} - 1; i >= 0; i--)); do
+    d="${ancestors[i]}"
+    case "$d" in /) f="/.curly.yaml" ;; *) f="$d/.curly.yaml" ;; esac
+    [ -f "$f" ] || continue
+    [ "$f" = "$HOME_YAML" ] && continue   # already added at base
+    CONFIG_FILES+=("$f")
+  done
+
+  [ "${#CONFIG_FILES[@]}" -gt 0 ]
+}
+
+# Discover + deep-merge into a single JSON blob. Sets CONFIG, CONFIG_FILES.
+build_config() {
+  discover_config_files || return 1
+  if [ "${#CONFIG_FILES[@]}" -eq 1 ]; then
+    CONFIG=$(yq -o=json '.' "${CONFIG_FILES[0]}")
+  else
+    CONFIG=$(yq ea -o=json '. as $i ireduce ({}; . *d $i)' "${CONFIG_FILES[@]}")
+  fi
+}
+
+config_not_found() {
+  if [ -n "${CURLY_YAML:-}" ]; then
+    echo "curly: \$CURLY_YAML=$CURLY_YAML not found" >&2
+  else
+    echo "curly: no .curly.yaml found in \$HOME or ancestors of $(pwd)" >&2
+    echo "  See github.com/wildeagency/curly for the starter file." >&2
+  fi
+}
+
 # ─── Subcommands ────────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -30,7 +94,8 @@ case "${1:-}" in
     sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 
   services)
-    yq -r '.services | to_entries[] | .key + "\t" + (.value.host // "")' "$YAML" |
+    build_config || { config_not_found; exit 1; }
+    jq -r '.services // {} | to_entries[] | .key + "\t" + (.value.host // "")' <<<"$CONFIG" |
       awk -F'\t' '{ printf "  %-12s %s\n", $1, $2 }'
     exit 0 ;;
 
@@ -39,26 +104,30 @@ case "${1:-}" in
       command -v "$d" >/dev/null || { echo "✗ $d missing (brew install $d)"; exit 1; }
     done
     echo "✓ deps: curl yq jq"
-    if [ -f "$YAML" ]; then
-      echo "✓ yaml: $YAML"
-      perms=$(stat -f '%Lp' "$YAML" 2>/dev/null || stat -c '%a' "$YAML" 2>/dev/null)
-      case "$perms" in 600|400) ;; *) echo "  ⚠ permissions are $perms — your tokens are world-readable. Run: chmod 600 $YAML" ;; esac
-    else
-      echo "✗ yaml: $YAML missing — see github.com/wildeagency/curly for the starter file"
+
+    if ! discover_config_files; then
+      config_not_found
       exit 1
     fi
-    yq '.' "$YAML" >/dev/null || { echo "✗ yaml parse error"; exit 1; }
+    echo "✓ config sources (later overrides earlier):"
+    for f in "${CONFIG_FILES[@]}"; do
+      perms=$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)
+      printf "    %s  (perms: %s)\n" "$f" "$perms"
+      case "$perms" in 600|400) ;; *) echo "      ⚠ tokens are world-readable. Run: chmod 600 $f" ;; esac
+      yq '.' "$f" >/dev/null || { echo "✗ yaml parse error in $f"; exit 1; }
+    done
+    build_config
     echo
     while IFS=$'\t' read -r svc auth token; do
       tok=$(expand "$token")
       case "$auth" in
         none)  state="ok" ;;
-        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN — edit token: under services.$svc in $YAML" ;; *) state="ok" ;; esac ;;
-        *)     [ -z "$tok" ] && state="MISSING TOKEN — edit token: under services.$svc in $YAML" || state="ok" ;;
+        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN — set services.$svc.token in your curly config" ;; *) state="ok" ;; esac ;;
+        *)     [ -z "$tok" ] && state="MISSING TOKEN — set services.$svc.token in your curly config" || state="ok" ;;
       esac
       printf "  %-12s %-7s %s\n" "$svc" "$auth" "$state"
-    done < <(yq -r '.services | to_entries[] |
-      .key + "\t" + (.value.auth // "none") + "\t" + (.value.token // "")' "$YAML")
+    done < <(jq -r '.services // {} | to_entries[] |
+      .key + "\t" + (.value.auth // "none") + "\t" + (.value.token // "")' <<<"$CONFIG")
     exit 0 ;;
 esac
 
@@ -70,13 +139,14 @@ SERVICE=$1
 REQ_PATH=$2
 shift 2
 
-[ -f "$YAML" ] || { echo "curly: $YAML not found (run: curly doctor)" >&2; exit 1; }
+build_config || { config_not_found; echo "  Run: curly doctor" >&2; exit 1; }
 
-# Pull this service's entry from the YAML as JSON, then read fields with jq.
-ENTRY=$(yq -o=json ".services.\"$SERVICE\" // null" "$YAML")
+# Pull the merged service entry as JSON.
+ENTRY=$(jq -c ".services[\"$SERVICE\"] // null" <<<"$CONFIG")
 [ "$ENTRY" = "null" ] && {
   echo "curly: unknown service '$SERVICE'" >&2
-  echo "  Available: $(yq -r '.services | keys | join(" ")' "$YAML")" >&2
+  echo "  Available: $(jq -r '.services // {} | keys | join(" ")' <<<"$CONFIG")" >&2
+  echo "  Sources: ${CONFIG_FILES[*]}" >&2
   exit 1
 }
 
@@ -97,7 +167,7 @@ case "$REQ_PATH" in /*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
 CURL=(-s)
 [ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
 
-no_token() { echo "curly: no token for '$SERVICE' — edit services.$SERVICE.token in $YAML" >&2; exit 1; }
+no_token() { echo "curly: no token for '$SERVICE' — set services.$SERVICE.token in your curly config (sources: ${CONFIG_FILES[*]})" >&2; exit 1; }
 
 case "$AUTH" in
   none)   ;;
@@ -113,7 +183,7 @@ case "$AUTH" in
   *)      echo "curly: '$SERVICE' has unknown auth '$AUTH'" >&2; exit 1 ;;
 esac
 
-# Static headers from the YAML's .headers map. Empty values get dropped.
+# Static headers from the merged .headers map. Empty values get dropped.
 while IFS=$'\t' read -r name value; do
   [ -z "$name" ] && continue
   value=$(expand "$value")

@@ -3,3 +3,4 @@
 *.bak.*
 .curly.env
 .curly.yaml
+/.idea/
