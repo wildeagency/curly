@@ -85,7 +85,7 @@ if [ "$on_path" -eq 0 ] && [ "$NO_PATH" != "1" ]; then
 fi
 
 # ─── 4. Starter YAML (only if absent) ───────────────────────────────────────
-YAML="$HOME/.curly.yaml"
+YAML="${CURLY_YAML:-$HOME/.curly.yaml}"
 if [ ! -f "$YAML" ]; then
   curl -fsSL "$RAW/examples/curly.yaml" -o "$YAML" || die "download failed: $RAW/examples/curly.yaml"
   chmod 600 "$YAML"
