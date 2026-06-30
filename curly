@@ -3,8 +3,18 @@
 # https://github.com/wildeagency/curly
 #
 # Usage: curly <service> <path> [curl-args...]
-#        curly services       # list services from the merged config
-#        curly doctor         # check deps, config sources, and token status
+#        curly services                          # list services from the merged config
+#        curly doctor                            # check deps, config sources, and token status
+#        curly init <service> [token] [k=v ...]  # write/update a service in ~/.curly.yaml
+#
+# `curly init` examples:
+#   curly init protocol tok_xxx                    # known service: just set the token
+#   curly init protocol tok_xxx ghost-user=user_x  # also set X-Ghost-User-Id header
+#   curly init stripe sk_live_xxx host=https://api.stripe.com auth=bearer  # new service
+#   curly init protocol                            # service exists → prompt for token
+#
+# Reserved k=v keys: host, auth, auth_header, user_agent, token, ghost-user.
+# Anything else is added under .headers (so `Notion-Version=2026-03-11` works).
 #
 # Config discovery (lowest → highest precedence, deep-merged):
 #   1. $HOME/.curly.yaml
@@ -97,6 +107,89 @@ case "${1:-}" in
     build_config || { config_not_found; exit 1; }
     jq -r '.services // {} | to_entries[] | .key + "\t" + (.value.host // "")' <<<"$CONFIG" |
       awk -F'\t' '{ printf "  %-12s %s\n", $1, $2 }'
+    exit 0 ;;
+
+  init)
+    shift
+    [ $# -ge 1 ] || { echo "curly init <service> [token] [k=v ...]" >&2; exit 1; }
+
+    SERVICE=$1; shift
+    case "$SERVICE" in *[!a-zA-Z0-9_-]*) echo "curly init: bad service name '$SERVICE'" >&2; exit 1 ;; esac
+
+    # First arg is the token if it has no '=' (positional, value-only).
+    INIT_TOKEN=""
+    if [ $# -gt 0 ] && [ "${1#*=}" = "$1" ]; then
+      INIT_TOKEN=$1; shift
+    fi
+
+    # Target file: $CURLY_YAML if set (sandbox/power-user), else $HOME/.curly.yaml.
+    # Other discovered files in the chain are read-only as far as `init` cares.
+    YAML="${CURLY_YAML:-$HOME_YAML}"
+    if [ ! -f "$YAML" ]; then
+      printf 'services: {}\n' > "$YAML"
+      chmod 600 "$YAML"
+      echo "→ created $YAML"
+    fi
+
+    # Detect whether the service already exists. `yq -e` exits non-zero when
+    # the selected value is null/missing/false — the canonical presence check.
+    if yq -e ".services.\"$SERVICE\"" "$YAML" >/dev/null 2>&1; then
+      EXISTS=1
+    else
+      EXISTS=0
+    fi
+
+    # If new service, require host= and auth= up front.
+    if [ "$EXISTS" -eq 0 ]; then
+      NEW_HOST=""; NEW_AUTH=""
+      for kv in "$@"; do
+        case "$kv" in
+          host=*) NEW_HOST=${kv#host=} ;;
+          auth=*) NEW_AUTH=${kv#auth=} ;;
+        esac
+      done
+      [ -n "$NEW_HOST" ] || { echo "curly init: new service '$SERVICE' needs host=<url>" >&2; exit 1; }
+      [ -n "$NEW_AUTH" ] || { echo "curly init: new service '$SERVICE' needs auth=<bearer|basic|header|cookie|none>" >&2; exit 1; }
+      SVC="$SERVICE" H="$NEW_HOST" A="$NEW_AUTH" \
+        yq -i '.services[strenv(SVC)] = {"host": strenv(H), "auth": strenv(A), "token": ""}' "$YAML"
+      echo "→ added service '$SERVICE' (host=$NEW_HOST auth=$NEW_AUTH)"
+    fi
+
+    # If no token was given and the existing service has an empty token, prompt.
+    if [ -z "$INIT_TOKEN" ]; then
+      CUR=$(yq -r ".services.\"$SERVICE\".token // \"\"" "$YAML")
+      if [ -z "$CUR" ] || [ "${CUR#*xxxxx}" != "$CUR" ]; then
+        if [ -t 0 ] && [ -t 1 ]; then
+          printf 'Token for %s (input hidden, blank to skip): ' "$SERVICE" >&2
+          stty -echo 2>/dev/null || true
+          IFS= read -r INIT_TOKEN || true
+          stty echo 2>/dev/null || true
+          printf '\n' >&2
+        fi
+      fi
+    fi
+
+    # Apply token.
+    if [ -n "$INIT_TOKEN" ]; then
+      SVC="$SERVICE" V="$INIT_TOKEN" yq -i '.services[strenv(SVC)].token = strenv(V)' "$YAML"
+    fi
+
+    # Apply remaining key=value extras.
+    for kv in "$@"; do
+      case "$kv" in *=*) ;; *) continue ;; esac
+      k=${kv%%=*}; v=${kv#*=}
+      case "$k" in
+        host|auth|auth_header|user_agent|token)
+          SVC="$SERVICE" K="$k" V="$v" yq -i '.services[strenv(SVC)][strenv(K)] = strenv(V)' "$YAML" ;;
+        ghost-user|ghost_user)
+          SVC="$SERVICE" V="$v" yq -i '.services[strenv(SVC)].headers["X-Ghost-User-Id"] = strenv(V)' "$YAML" ;;
+        *)
+          SVC="$SERVICE" K="$k" V="$v" yq -i '.services[strenv(SVC)].headers[strenv(K)] = strenv(V)' "$YAML" ;;
+      esac
+    done
+
+    chmod 600 "$YAML"
+    echo "✓ $SERVICE saved to $YAML"
     exit 0 ;;
 
   doctor)
