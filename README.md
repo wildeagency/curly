@@ -22,38 +22,52 @@ Single bash file. Three dependencies (`curl`, `yq`, `jq`). No daemon, no agent, 
 
 ---
 
-## The 60-second install (recommended)
+## Install
 
-Open Claude Code or Codex CLI and paste:
+**Tokens never go through the agent.** Neither install path below asks you to paste an API key into a chat. Tokens go from your terminal into `curly init`'s hidden-input prompt (`stty -echo`) and land directly in `~/.curly.yaml` at `chmod 600`. If any docs, blog post, or agent tells you to paste tokens into a chat window to set up curly, that flow is retired — point them here.
 
-> "Install curly from github.com/wildeagency/curly. Ask me which APIs I want to set up, then ask me for each token one at a time and write them into ~/.curly.yaml. `chmod 600` the file. Run `curly doctor` to verify."
+### With an agent (Claude Code, Codex CLI, etc.)
 
-The agent reads this README, drops the script in `~/.local/bin/curly`, asks you which services you want (Notion, GitHub, Slack, Linear, Airtable, Stripe, anything else), then asks for each token one at a time. You paste each token; the agent writes them into `~/.curly.yaml` directly and `chmod 600`s the file so only you can read it. Five minutes start to finish.
-
-This is the same install everyone else does — just delegated to the agent that already lives in your terminal.
-
-## The manual install
-
-If you'd rather drive yourself:
+Copy the setup skill into your agent's skills directory, then ask it to run.
 
 ```bash
-brew install yq jq
+mkdir -p ~/.claude/skills
+curl -sL https://raw.githubusercontent.com/wildeagency/curly/main/skills/curly-setup/SKILL.md \
+  -o ~/.claude/skills/curly-setup/SKILL.md
+```
+
+Then in Claude Code:
+
+> "Install curly using the curly-setup skill."
+
+The agent installs the script, wires PATH, and — for each service you name — tells you the exact command to run in your own terminal. You run `curly init <service>` yourself; curly prompts for the token with input hidden and writes it straight to the YAML. The agent never sees the token.
+
+### Manual (yourself)
+
+```bash
+brew install yq jq   # or: sudo apt-get install -y yq jq
 
 mkdir -p ~/.local/bin
-curl -sL https://raw.githubusercontent.com/wildeagency/curly/main/curly \
+curl -fsSL https://raw.githubusercontent.com/wildeagency/curly/main/curly \
   -o ~/.local/bin/curly && chmod +x ~/.local/bin/curly
+export PATH="$HOME/.local/bin:$PATH"   # add this line to ~/.zshrc or ~/.bashrc
 
-curl -sL https://raw.githubusercontent.com/wildeagency/curly/main/examples/curly.yaml \
-  -o ~/.curly.yaml && chmod 600 ~/.curly.yaml
+# Per service — curly creates ~/.curly.yaml at chmod 600 on first run and
+# prompts for the token with input hidden. Built-in defaults for common
+# services (host + auth) mean you only supply the token:
+curly init protocol       # then paste your protocol.supply token when prompted
+curly init notion         # then paste your Notion integration token
+curly init gh             # then paste your GitHub PAT
+# ... same shape for: slack linear airtable posthog n8n clickup mailgun luma
+
+# Anything not in the built-in list needs host= and auth=:
+curly init stripe host=https://api.stripe.com auth=bearer
+# (curly then prompts for the token)
+
+curly doctor              # verifies deps, perms, and .gitignore hygiene
 ```
 
-Edit `~/.curly.yaml`, replace the `xxx...` placeholders with your real tokens (delete the services you don't want), then:
-
-```bash
-curly doctor
-```
-
-`curly doctor` will warn you if the YAML's permissions are not `600` or `400` — your tokens are in this file, so it has to be readable only by you.
+`curly doctor` will error out if `.curly.yaml` is tracked by git (rotate immediately) and warn if a repo-local `.curly.yaml` isn't covered by `.gitignore`.
 
 ---
 
@@ -153,14 +167,18 @@ Running `curly n8n /workflows` from inside `~/code/staging-tools/` (or any subdi
 
 `~/.curly.yaml` holds your tokens in cleartext. Two house rules:
 
-**`chmod 600 ~/.curly.yaml`.** Owner-only read/write. `curly doctor` checks this and warns if the file is world-readable. (The recommended install does it for you; do it yourself if you ran the manual install or edited the file with an editor that reset permissions.)
+**`chmod 600 ~/.curly.yaml`.** Owner-only read/write. `curly init` sets this on file creation. `curly doctor` warns if the file is world-readable.
 
-**Don't commit it.** Add `.curly.yaml` to your global `.gitignore`:
+**Don't commit it.** `curly doctor` **errors out** if any `.curly.yaml` in the config chain is tracked by git — that's a rotate-your-tokens-now condition. It also warns if a repo-local `.curly.yaml` isn't covered by `.gitignore`. Best practice: add `.curly.yaml` to your global `.gitignore` so you can't forget:
 
 ```bash
 git config --global core.excludesfile ~/.gitignore_global
 echo '.curly.yaml' >> ~/.gitignore_global
 ```
+
+**Host-override guard.** If a `.curly.yaml` inside a project directory changes `host` for a service while inheriting the token from `~/.curly.yaml`, curly refuses the request — that shape can exfiltrate real credentials to an attacker-controlled endpoint. Opt in per-invocation with `CURLY_ALLOW_HOST_OVERRIDE=1` if the shape is intentional.
+
+**No `eval` on config values.** `${VAR}` and `${VAR:-default}` expand via bash indirection (`${!name-}`), not `eval`. Anything else in a YAML value — backticks, `$(…)`, stray quotes — passes through as literal text and cannot execute code.
 
 What `curly` does NOT protect against:
 

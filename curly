@@ -32,14 +32,39 @@ set -euo pipefail
 HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")
 HOME_YAML="$HOME_REAL/.curly.yaml"
 
-# Expand ${VAR} / ${VAR:-default} in a string. Trusted config: rejects
-# backticks and $() so a YAML value can't run commands.
+# Expand ${VAR} / ${VAR:-default} in a string. No eval — a scanner that
+# substitutes only those two forms via indirection. Anything else (backticks,
+# $(…), stray $, malformed braces, nested ${…} in defaults) passes through
+# as literal text, so a hostile YAML value can never execute code.
 expand() {
-  # shellcheck disable=SC2016
-  case "$1" in *'`'*|*'$('*) echo "curly: unsafe value: $1" >&2; exit 1 ;; esac
-  local _u=0; case $- in *u*) _u=1; set +u ;; esac
-  eval "printf '%s' \"$1\""
-  [ "$_u" = 1 ] && set -u
+  local s=$1 out= var def
+  while :; do
+    case "$s" in
+      *'${'*) ;;
+      *) out+=$s; break ;;
+    esac
+    out+=${s%%\$\{*}
+    s=${s#*\$\{}
+    case "$s" in
+      *'}'*) ;;
+      *) out+='${'$s; break ;;                  # unterminated — literal
+    esac
+    var=${s%%\}*}
+    s=${s#*\}}
+    case "$var" in
+      *:-*) def=${var#*:-}; var=${var%%:-*} ;;
+      *)    def= ;;
+    esac
+    case "$var" in
+      ''|*[!A-Za-z0-9_]*) out+='${'$var'}'; continue ;;   # not a var name — literal
+    esac
+    if [ -n "${!var-}" ]; then
+      out+=${!var}
+    elif [ -n "$def" ]; then
+      out+=$(expand "$def")                     # defaults may nest ${VAR}
+    fi
+  done
+  printf '%s' "$out"
 }
 
 # Discover .curly.yaml files in precedence order (lowest → highest).
@@ -139,20 +164,51 @@ case "${1:-}" in
       EXISTS=0
     fi
 
-    # If new service, require host= and auth= up front.
+    # If new service, seed host+auth. Known services get sensible defaults
+    # from a built-in table; unknown ones require the user to pass host= and
+    # auth= as flags.
     if [ "$EXISTS" -eq 0 ]; then
-      NEW_HOST=""; NEW_AUTH=""
+      NEW_HOST=""; NEW_AUTH=""; NEW_AUTH_HEADER=""; NEW_UA=""; NEW_HEADERS_JSON="{}"
       for kv in "$@"; do
         case "$kv" in
           host=*) NEW_HOST=${kv#host=} ;;
           auth=*) NEW_AUTH=${kv#auth=} ;;
+          auth_header=*) NEW_AUTH_HEADER=${kv#auth_header=} ;;
         esac
       done
+      # Built-in known-service registry. Only host + auth (+ auth_header where
+      # non-obvious). Tokens NEVER live in the script.
+      if [ -z "$NEW_HOST" ] && [ -z "$NEW_AUTH" ]; then
+        case "$SERVICE" in
+          protocol) NEW_HOST="https://api.protocol.supply"; NEW_AUTH="bearer" ;;
+          notion)   NEW_HOST="https://api.notion.com/v1"; NEW_AUTH="bearer";
+                    NEW_HEADERS_JSON='{"Notion-Version":"2026-03-11"}' ;;
+          gh)       NEW_HOST="https://api.github.com"; NEW_AUTH="bearer";
+                    NEW_HEADERS_JSON='{"X-GitHub-Api-Version":"2022-11-28"}' ;;
+          slack)    NEW_HOST="https://slack.com/api"; NEW_AUTH="bearer" ;;
+          linear)   NEW_HOST="https://api.linear.app"; NEW_AUTH="bearer" ;;
+          airtable) NEW_HOST="https://api.airtable.com"; NEW_AUTH="bearer" ;;
+          posthog)  NEW_HOST="https://us.posthog.com"; NEW_AUTH="bearer" ;;
+          n8n)      NEW_HOST="http://localhost:5678/api/v1"; NEW_AUTH="header"; NEW_AUTH_HEADER="X-N8N-API-KEY" ;;
+          clickup)  NEW_HOST="https://api.clickup.com/api/v2"; NEW_AUTH="header"; NEW_AUTH_HEADER="Authorization" ;;
+          mailgun)  NEW_HOST="https://api.mailgun.net/v3"; NEW_AUTH="basic" ;;
+          luma)     NEW_HOST="https://api.lu.ma"; NEW_AUTH="cookie";
+                    NEW_UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' ;;
+        esac
+      fi
       [ -n "$NEW_HOST" ] || { echo "curly init: new service '$SERVICE' needs host=<url>" >&2; exit 1; }
       [ -n "$NEW_AUTH" ] || { echo "curly init: new service '$SERVICE' needs auth=<bearer|basic|header|cookie|none>" >&2; exit 1; }
       SVC="$SERVICE" H="$NEW_HOST" A="$NEW_AUTH" \
         yq -i '.services[strenv(SVC)] = {"host": strenv(H), "auth": strenv(A), "token": ""}' "$YAML"
-      echo "→ added service '$SERVICE' (host=$NEW_HOST auth=$NEW_AUTH)"
+      if [ "$NEW_HEADERS_JSON" != "{}" ]; then
+        SVC="$SERVICE" HJ="$NEW_HEADERS_JSON" \
+          yq -i '.services[strenv(SVC)].headers = (strenv(HJ) | from_json)' "$YAML"
+      fi
+      [ -n "$NEW_AUTH_HEADER" ] && SVC="$SERVICE" AH="$NEW_AUTH_HEADER" \
+        yq -i '.services[strenv(SVC)].auth_header = strenv(AH)' "$YAML"
+      [ -n "$NEW_UA" ] && SVC="$SERVICE" UA="$NEW_UA" \
+        yq -i '.services[strenv(SVC)].user_agent = strenv(UA)' "$YAML"
+      echo "→ added service '$SERVICE' (host=$NEW_HOST auth=$NEW_AUTH${NEW_AUTH_HEADER:+ auth_header=$NEW_AUTH_HEADER})"
     fi
 
     # If no token was given and the existing service has an empty token, prompt.
@@ -203,12 +259,26 @@ case "${1:-}" in
       exit 1
     fi
     echo "✓ config sources (later overrides earlier):"
+    doctor_bad=0
     for f in "${CONFIG_FILES[@]}"; do
       perms=$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null)
       printf "    %s  (perms: %s)\n" "$f" "$perms"
       case "$perms" in 600|400) ;; *) echo "      ⚠ tokens are world-readable. Run: chmod 600 $f" ;; esac
       yq '.' "$f" >/dev/null || { echo "✗ yaml parse error in $f"; exit 1; }
+
+      # If the file lives inside a git work tree, it must not be tracked and
+      # should be covered by .gitignore. `git check-ignore` returns 0 when the
+      # path IS ignored; `git ls-files --error-unmatch` returns 0 when tracked.
+      if git_top=$(git -C "$(dirname "$f")" rev-parse --show-toplevel 2>/dev/null); then
+        if git -C "$git_top" ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+          echo "      ✗ TRACKED BY GIT ($git_top). Tokens are in history — rotate now, then: git rm --cached '$f'"
+          doctor_bad=1
+        elif ! git -C "$git_top" check-ignore -q "$f" 2>/dev/null; then
+          echo "      ⚠ not covered by .gitignore in $git_top. Run: echo '.curly.yaml' >> '$git_top/.gitignore'"
+        fi
+      fi
     done
+    [ "$doctor_bad" = "1" ] && exit 1
     build_config
     echo
     while IFS=$'\t' read -r svc auth token; do
@@ -247,6 +317,40 @@ HOST=$(expand "$(jq -r '.host        // ""'    <<<"$ENTRY")")
 TOKEN=$(expand "$(jq -r '.token       // ""'   <<<"$ENTRY")")
 AUTH=$(jq -r        '.auth        // "none"'    <<<"$ENTRY")
 AUTH_HEADER=$(jq -r '.auth_header // ""'        <<<"$ENTRY")
+
+# Host-override / token-inherit guard. Walk CONFIG_FILES highest→lowest and
+# find the file that defined the effective `host` vs the effective `token`.
+# If a later file (project-local) set the host while the token came from an
+# earlier file (home / higher-scope), a hostile checkout could redirect real
+# credentials to an attacker-controlled endpoint. Refuse — unless the user
+# opts in with CURLY_ALLOW_HOST_OVERRIDE=1.
+if [ "${CURLY_ALLOW_HOST_OVERRIDE:-0}" != "1" ] && [ -n "$TOKEN" ] && [ -n "$HOST" ] && [ "${#CONFIG_FILES[@]}" -gt 1 ]; then
+  HOST_SRC=""; TOKEN_SRC=""
+  for ((i = ${#CONFIG_FILES[@]} - 1; i >= 0; i--)); do
+    f="${CONFIG_FILES[i]}"
+    if [ -z "$HOST_SRC" ] && yq -e ".services.\"$SERVICE\".host" "$f" >/dev/null 2>&1; then HOST_SRC=$f; fi
+    if [ -z "$TOKEN_SRC" ] && yq -e ".services.\"$SERVICE\".token" "$f" >/dev/null 2>&1; then TOKEN_SRC=$f; fi
+    [ -n "$HOST_SRC" ] && [ -n "$TOKEN_SRC" ] && break
+  done
+  if [ -n "$HOST_SRC" ] && [ -n "$TOKEN_SRC" ] && [ "$HOST_SRC" != "$TOKEN_SRC" ]; then
+    # Precedence rank = position in CONFIG_FILES (higher index = higher precedence).
+    host_rank=-1; token_rank=-1
+    for ((i = 0; i < ${#CONFIG_FILES[@]}; i++)); do
+      [ "${CONFIG_FILES[i]}" = "$HOST_SRC"  ] && host_rank=$i
+      [ "${CONFIG_FILES[i]}" = "$TOKEN_SRC" ] && token_rank=$i
+    done
+    if [ "$host_rank" -gt "$token_rank" ]; then
+      {
+        echo "curly: refusing '$SERVICE' — host override inherits token."
+        echo "  host  defined in: $HOST_SRC"
+        echo "  token defined in: $TOKEN_SRC  (would be sent to the overridden host)"
+        echo "  This can leak credentials if the higher-precedence file is untrusted."
+        echo "  If intentional, re-run with CURLY_ALLOW_HOST_OVERRIDE=1 curly $SERVICE ..."
+      } >&2
+      exit 1
+    fi
+  fi
+fi
 USER_AGENT=$(expand "$(jq -r '.user_agent // ""' <<<"$ENTRY")")
 
 # Leading "/" is optional — always prepend if missing. This includes @refs
