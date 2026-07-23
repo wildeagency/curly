@@ -361,7 +361,10 @@ case "$REQ_PATH" in /*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
 
 # ─── Build curl args ────────────────────────────────────────────────────────
 
-CURL=(-s)
+# --fail-with-body: curly's exit reflects HTTP status — non-zero on 4xx/5xx —
+# instead of only curl's transport success (#1). The body is still emitted on
+# error, so the message stays visible and a caller can distinguish states from it.
+CURL=(-s --fail-with-body)
 [ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
 
 no_token() { echo "curly: no token for '$SERVICE' — set services.$SERVICE.token in your curly config (sources: ${CONFIG_FILES[*]})" >&2; exit 1; }

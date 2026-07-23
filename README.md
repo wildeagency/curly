@@ -89,6 +89,8 @@ Leading `/` on `<path>` is optional: `curly gh user` == `curly gh /user`.
 
 Any `curl` flag passes through: `-G`, `-X DELETE`, `-d @body.json`, `--data-urlencode`, `-i`, `-v`, `-o file`…
 
+**Exit codes reflect HTTP status.** curly runs with `--fail-with-body`, so an HTTP error is a non-zero exit — a 4xx/5xx **fails** instead of masquerading as success, while the error body is still printed so you can see (and parse) what went wrong. `2xx/3xx` → exit 0; `4xx/5xx` → exit 22; a transport failure keeps curl'"'"'s own exit code. This means `curly svc /thing && next` no longer runs `next` on a 404.
+
 ---
 
 ## Adding a service
