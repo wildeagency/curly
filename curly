@@ -359,12 +359,24 @@ USER_AGENT=$(expand "$(jq -r '.user_agent // ""' <<<"$ENTRY")")
 # userinfo, producing "Could not resolve host" errors.
 case "$REQ_PATH" in /*) ;; *) REQ_PATH=/$REQ_PATH ;; esac
 
+# Percent-encode whitespace. curl 8.x rejects a URL containing a literal space
+# ("URL rejected: Malformed input to a URL function", exit 3) and emits nothing,
+# so `curly protocol "search?q=two words"` looked like an empty knowledge base
+# rather than a syntax slip. Raw whitespace is never legal in a URL, so encoding
+# it here can't double-encode an already-escaped path.
+REQ_PATH=${REQ_PATH//$'\t'/%09}
+REQ_PATH=${REQ_PATH//$'\n'/%0A}
+REQ_PATH=${REQ_PATH// /%20}
+
 # ─── Build curl args ────────────────────────────────────────────────────────
 
 # --fail-with-body: curly's exit reflects HTTP status — non-zero on 4xx/5xx —
 # instead of only curl's transport success (#1). The body is still emitted on
 # error, so the message stays visible and a caller can distinguish states from it.
-CURL=(-s --fail-with-body)
+# -S on top of -s: transport failures (DNS, refused, malformed URL) produce no
+# body at all, so without it curl exits non-zero in total silence and the caller
+# cannot tell "broken request" from "no results".
+CURL=(-sS --fail-with-body)
 [ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
 
 no_token() { echo "curly: no token for '$SERVICE' — set services.$SERVICE.token in your curly config (sources: ${CONFIG_FILES[*]})" >&2; exit 1; }
