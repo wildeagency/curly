@@ -396,17 +396,53 @@ case "$AUTH" in
 esac
 
 # Static headers from the merged .headers map. Empty values get dropped.
+# A caller-supplied -H/--header with the same name wins: skip the static copy,
+# otherwise curl sends the header twice and servers join the values ("a, b"),
+# which breaks exact-match consumers (e.g. X-Ghost-User-Id lookups).
 while IFS=$'\t' read -r name value; do
   [ -z "$name" ] && continue
+  lname=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+  skip=0 prev=""
+  for a in "$@"; do
+    if [ "$prev" = "-H" ] || [ "$prev" = "--header" ]; then
+      case "$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')" in
+        "$lname:"*) skip=1 ;;
+      esac
+    fi
+    prev=$a
+  done
+  [ "$skip" = 1 ] && continue
   value=$(expand "$value")
   [ -n "$value" ] && CURL+=(-H "$name: $value")
 done < <(jq -r '.headers // {} | to_entries[] | .key + "\t" + .value' <<<"$ENTRY")
 
-# Auto Content-Type when the caller sends a JSON body.
+# Auto Content-Type when the caller sends a JSON body — UNLESS the caller supplied one.
+# Two Content-Type headers is not a duplicate curl quietly de-dupes: curl sends both, and
+# the receiving API picks one or gives up. Slack answers `invalid_post_type`; Notion answers
+# 200 having silently DROPPED the whole body, so a filtered query returns unfiltered rows and
+# nothing anywhere reports an error. The caller's header wins — it is the specific one
+# (`; charset=utf-8` is exactly what Slack wants), and a caller who typed it meant it.
+# Same caller-wins rule as the static-header block above; this is the auto-header half.
+# Four recorded re-hits of the duplicate (2026-07-07, 08-11, 08-18, 08-25), every one written
+# down and none of them prevented by having been written down. Tests, which assert the emitted
+# curl argv rather than an API's mood: ./test-header-precedence.sh
+caller_ct="" prev=""
 for a in "$@"; do
-  case "$a" in -d|--data|--data-raw|--data-binary|--json)
-    CURL+=(-H "Content-Type: application/json"); break ;;
+  case "$a" in
+    -H?*) case "$(printf '%s' "${a#-H}" | tr '[:upper:]' '[:lower:]')" in content-type:*) caller_ct=1 ;; esac ;;
+    --header=*) case "$(printf '%s' "${a#--header=}" | tr '[:upper:]' '[:lower:]')" in content-type:*) caller_ct=1 ;; esac ;;
   esac
+  case "$prev" in
+    -H|--header) case "$(printf '%s' "$a" | tr '[:upper:]' '[:lower:]')" in content-type:*) caller_ct=1 ;; esac ;;
+  esac
+  prev=$a
 done
+if [ -z "$caller_ct" ]; then
+  for a in "$@"; do
+    case "$a" in -d|--data|--data-raw|--data-binary|--json)
+      CURL+=(-H "Content-Type: application/json"); break ;;
+    esac
+  done
+fi
 
 exec curl "${CURL[@]}" "${HOST}${REQ_PATH}" "$@"
