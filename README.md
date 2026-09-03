@@ -31,7 +31,7 @@ Single bash file. Three dependencies (`curl`, `yq`, `jq`). No daemon, no agent, 
 Copy the setup skill into your agent's skills directory, then ask it to run.
 
 ```bash
-mkdir -p ~/.claude/skills
+mkdir -p ~/.claude/skills/curly-setup
 curl -sL https://raw.githubusercontent.com/wildeagency/curly/main/skills/curly-setup/SKILL.md \
   -o ~/.claude/skills/curly-setup/SKILL.md
 ```
