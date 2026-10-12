@@ -160,7 +160,7 @@ Uninstall this skill from the active set once done. It's one-time.
 - **User pastes a token into chat by accident.** — Tell them to rotate it. Do not proceed with the leaked token.
 - **A `.curly.yaml` already exists in a project checkout with real tokens in it.** — Warn. Move it to `~/.curly.yaml` with `chmod 600`, or delete it and re-`init`. Then `.gitignore` per Step 6, and check `git log --all -- .curly.yaml` to see if it was ever committed. If yes, tokens must be rotated.
 - **`curly init` prompt hangs when you run it from Bash tool.** — Correct behavior; that's why Step 5 says instruct-don't-run.
-- **User is on Windows.** — This skill doesn't cover it. Point them at WSL or the manual install path in the README.
+- **User is on Windows.** — WSL2 is the supported path: run this skill inside WSL2 as on Linux. In Git Bash it works once `jq` and `yq` are installed (`winget install jqlang.jq MikeFarah.yq`). PowerShell-only: point them at https://api.protocol.supply/@protocol/windows.
 
 ## What this skill does NOT do
 

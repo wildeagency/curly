@@ -28,15 +28,18 @@ Single bash file. Three dependencies (`curl`, `yq`, `jq`). No daemon, no agent, 
 
 ### With an agent (Claude Code, Codex CLI, etc.)
 
-Copy the setup skill into your agent's skills directory, then ask it to run.
+Copy the setup skill into your agent's skills directory, then ask it to run. Claude Code reads `~/.claude/skills/`; Codex reads `~/.agents/skills/` (set `SKILLS=~/.agents/skills` below).
 
 ```bash
-mkdir -p ~/.claude/skills/curly-setup
+SKILLS=~/.claude/skills   # Codex: ~/.agents/skills
+mkdir -p "$SKILLS/curly-setup"
 curl -sL https://raw.githubusercontent.com/wildeagency/curly/main/skills/curly-setup/SKILL.md \
-  -o ~/.claude/skills/curly-setup/SKILL.md
+  -o "$SKILLS/curly-setup/SKILL.md"
 ```
 
-Then in Claude Code:
+Codex's default sandbox blocks network for commands; allow it with `network_access = true` under `[sandbox_workspace_write]` in `~/.codex/config.toml`. On Windows, use WSL2 (supported) or Git Bash with `jq` and `yq` installed — see [`@protocol/windows`](https://api.protocol.supply/@protocol/windows).
+
+Then in your agent:
 
 > "Install curly using the curly-setup skill."
 
