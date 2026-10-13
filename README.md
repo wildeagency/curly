@@ -214,8 +214,8 @@ Send `curly-shape.yaml`. They paste their own tokens in.
 
 1. Discover every `.curly.yaml` in the chain (`$HOME` + ancestors of `$PWD`).
 2. Deep-merge them into a single JSON blob via `yq ea`.
-3. Look up the service, build a `curl` argv based on the `auth:` mode.
-4. `exec curl`.
+3. Look up the service. Credentials and config headers go into a `curl -K` config, not argv.
+4. `exec curl`, with that config on a process-substitution fd, so the token never shows up in `ps`.
 
 The subcommands (`services`, `doctor`) are a few lines each at the top, in a `case` statement.
 

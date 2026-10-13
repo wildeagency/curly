@@ -379,19 +379,35 @@ REQ_PATH=${REQ_PATH// /%20}
 CURL=(-sS --fail-with-body)
 [ -n "$USER_AGENT" ] && CURL+=(-A "$USER_AGENT")
 
+# Credentials and config-derived headers never go in curl's argv (#3). argv is
+# readable by anything that lists processes — `ps`, /proc/<pid>/cmdline, and the
+# agent transcripts that capture them — so `-H "Authorization: Bearer …"` handed
+# the token to exactly the surfaces curly exists to keep it out of. Instead they
+# accumulate here as a curl config (`-K`) and reach curl through a process-
+# substitution fd: an in-memory pipe, no temp file, and stdin stays free for a
+# caller's `-d @-`. The writer is a forked shell running the printf builtin, so
+# no other process ever carries the value in its argv either.
+CFG=""
+cfg() { # cfg <long-option> <value> — append one quoted line to the curl config
+  case "$2" in *$'\n'*|*$'\r'*) echo "curly: '$SERVICE' $1 value contains a newline — refusing" >&2; exit 1 ;; esac
+  local v=${2//\\/\\\\}
+  v=${v//\"/\\\"}
+  CFG+="$1 = \"$v\""$'\n'
+}
+
 no_token() { echo "curly: no token for '$SERVICE' — set services.$SERVICE.token in your curly config (sources: ${CONFIG_FILES[*]})" >&2; exit 1; }
 
 case "$AUTH" in
   none)   ;;
   bearer) [ -n "$TOKEN" ] || no_token
-          CURL+=(-H "Authorization: Bearer $TOKEN") ;;
+          cfg header "Authorization: Bearer $TOKEN" ;;
   basic)  case "$TOKEN" in ""|:*|*:) echo "curly: '$SERVICE' needs user:pass in token" >&2; exit 1 ;; esac
-          CURL+=(-u "$TOKEN") ;;
+          cfg user "$TOKEN" ;;
   header) [ -n "$TOKEN"       ] || no_token
           [ -n "$AUTH_HEADER" ] || { echo "curly: '$SERVICE' auth=header needs auth_header" >&2; exit 1; }
-          CURL+=(-H "$AUTH_HEADER: $TOKEN") ;;
+          cfg header "$AUTH_HEADER: $TOKEN" ;;
   cookie) [ -n "$TOKEN" ] || no_token
-          CURL+=(-H "Cookie: $TOKEN") ;;
+          cfg header "Cookie: $TOKEN" ;;
   *)      echo "curly: '$SERVICE' has unknown auth '$AUTH'" >&2; exit 1 ;;
 esac
 
@@ -413,7 +429,7 @@ while IFS=$'\t' read -r name value; do
   done
   [ "$skip" = 1 ] && continue
   value=$(expand "$value")
-  [ -n "$value" ] && CURL+=(-H "$name: $value")
+  [ -n "$value" ] && cfg header "$name: $value"
 done < <(jq -r '.headers // {} | to_entries[] | .key + "\t" + .value' <<<"$ENTRY")
 
 # Auto Content-Type when the caller sends a JSON body — UNLESS the caller supplied one.
@@ -440,9 +456,12 @@ done
 if [ -z "$caller_ct" ]; then
   for a in "$@"; do
     case "$a" in -d|--data|--data-raw|--data-binary|--json)
-      CURL+=(-H "Content-Type: application/json"); break ;;
+      cfg header "Content-Type: application/json"; break ;;
     esac
   done
 fi
 
-exec curl "${CURL[@]}" "${HOST}${REQ_PATH}" "$@"
+# The <(…) must sit on the exec line itself: bash closes a process-substitution fd when
+# the command that created it finishes, so building it into CURL+=() hands curl a dead fd.
+# An empty config is harmless, so it is passed unconditionally.
+exec curl "${CURL[@]}" -K <(printf '%s' "$CFG") "${HOST}${REQ_PATH}" "$@"
