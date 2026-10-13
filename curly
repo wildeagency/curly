@@ -37,17 +37,17 @@ HOME_YAML="$HOME_REAL/.curly.yaml"
 # $(…), stray $, malformed braces, nested ${…} in defaults) passes through
 # as literal text, so a hostile YAML value can never execute code.
 expand() {
-  local s=$1 out= var def
+  local s=$1 out='' var def
   while :; do
     case "$s" in
-      *'${'*) ;;
+      *\$\{*) ;;
       *) out+=$s; break ;;
     esac
     out+=${s%%\$\{*}
     s=${s#*\$\{}
     case "$s" in
       *'}'*) ;;
-      *) out+='${'$s; break ;;                  # unterminated — literal
+      *) out+="\${$s"; break ;;                  # unterminated — literal
     esac
     var=${s%%\}*}
     s=${s#*\}}
@@ -56,7 +56,7 @@ expand() {
       *)    def= ;;
     esac
     case "$var" in
-      ''|*[!A-Za-z0-9_]*) out+='${'$var'}'; continue ;;   # not a var name — literal
+      ''|*[!A-Za-z0-9_]*) out+="\${$var}"; continue ;;   # not a var name — literal
     esac
     if [ -n "${!var-}" ]; then
       out+=${!var}
@@ -109,6 +109,7 @@ build_config() {
   if [ "${#CONFIG_FILES[@]}" -eq 1 ]; then
     CONFIG=$(yq -o=json '.' "${CONFIG_FILES[0]}")
   else
+    # shellcheck disable=SC2016  # $i is a yq variable, not a shell one
     CONFIG=$(yq ea -o=json '. as $i ireduce ({}; . *d $i)' "${CONFIG_FILES[@]}")
   fi
 }
