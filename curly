@@ -67,6 +67,18 @@ expand() {
   printf '%s' "$out"
 }
 
+# Redact secrets from a URL before DISPLAYING it (never used to build a request).
+# Some services carry their credential in the host itself — Telegram's
+# https://api.telegram.org/bot<id>:<token>/ — so printing the host prints the
+# secret into every terminal and agent transcript that runs `curly services`.
+# Masks: URL userinfo (user:pass@), /bot<digits>:<token> path segments, and
+# credential-named query params. One jq def, shared by every printer.
+REDACT_URL_JQ='def redact_url:
+  gsub("(?<p>://)[^/@\\s]+@"; "\(.p)<REDACTED>@")
+  | gsub("/bot[0-9]+:[A-Za-z0-9_-]+"; "/bot<REDACTED>")
+  | gsub("(?<k>[?&](token|key|secret|api_key|apikey|access_token|auth|password)=)[^&#\\s]*"; "\(.k)<REDACTED>"; "i");'
+redact_url() { jq -nr --arg u "$1" "$REDACT_URL_JQ"' $u | redact_url'; }
+
 # Discover .curly.yaml files in precedence order (lowest → highest).
 # Sets CONFIG_FILES array. Returns 1 if none found.
 discover_config_files() {
@@ -131,7 +143,7 @@ case "${1:-}" in
 
   services)
     build_config || { config_not_found; exit 1; }
-    jq -r '.services // {} | to_entries[] | .key + "\t" + (.value.host // "")' <<<"$CONFIG" |
+    jq -r "$REDACT_URL_JQ"' .services // {} | to_entries[] | .key + "\t" + ((.value.host // "") | redact_url)' <<<"$CONFIG" |
       awk -F'\t' '{ printf "  %-12s %s\n", $1, $2 }'
     exit 0 ;;
 
@@ -209,7 +221,7 @@ case "${1:-}" in
         yq -i '.services[strenv(SVC)].auth_header = strenv(AH)' "$YAML"
       [ -n "$NEW_UA" ] && SVC="$SERVICE" UA="$NEW_UA" \
         yq -i '.services[strenv(SVC)].user_agent = strenv(UA)' "$YAML"
-      echo "→ added service '$SERVICE' (host=$NEW_HOST auth=$NEW_AUTH${NEW_AUTH_HEADER:+ auth_header=$NEW_AUTH_HEADER})"
+      echo "→ added service '$SERVICE' (host=$(redact_url "$NEW_HOST") auth=$NEW_AUTH${NEW_AUTH_HEADER:+ auth_header=$NEW_AUTH_HEADER})"
     fi
 
     # If no token was given and the existing service has an empty token, prompt.
