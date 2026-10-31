@@ -4,7 +4,7 @@
 #
 # Usage: curly <service> <path> [curl-args...]
 #        curly services                          # list services from the merged config
-#        curly doctor                            # check deps, config sources, and token status
+#        curly doctor [--offline]                # check deps, config sources, and that each token WORKS
 #        curly init <service> [token] [k=v ...]  # write/update a service in ~/.curly.yaml
 #
 # `curly init` examples:
@@ -31,6 +31,8 @@ set -euo pipefail
 # dedup below matches what `pwd -P` produces during the ancestor walk.
 HOME_REAL=$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")
 HOME_YAML="$HOME_REAL/.curly.yaml"
+# Absolute path to this script — doctor re-enters it to probe each service.
+CURLY_SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")
 
 # Expand ${VAR} / ${VAR:-default} in a string. No eval — a scanner that
 # substitutes only those two forms via indirection. Anything else (backticks,
@@ -133,6 +135,105 @@ config_not_found() {
     echo "curly: no .curly.yaml found in \$HOME or ancestors of $(pwd)" >&2
     echo "  See github.com/wildeagency/curly for the starter file." >&2
   fi
+}
+
+# ─── doctor: token validity ─────────────────────────────────────────────────
+
+# A token that is present is not a token that works: an expired or revoked one
+# used to read "ok". doctor now spends one cheap authenticated call per service
+# to find out. Some APIs make this subtle — protocol.supply quietly downgrades a
+# bad token to anonymous on public paths (`/`, `/ls` answer 200), and Slack says
+# `{"ok":false}` with HTTP 200 — so each probe path must REQUIRE auth, and the
+# body is inspected, never printed (OpenAI echoes the key back in its 401 body).
+
+# builtin_check <host> — "METHOD<US>path<US>body" for a known API, else nothing.
+# Matched on host, not service name, so a service called anything still gets it.
+builtin_check() {
+  local h=${1%/} us=$'\x1f'
+  case "$h" in
+    https://api.protocol.supply)            printf 'GET%s/impulse/mine?limit=1%s' "$us" "$us" ;;
+    https://api.github.com)                 printf 'GET%s/user%s' "$us" "$us" ;;
+    https://slack.com/api)                  printf 'GET%s/auth.test%s' "$us" "$us" ;;
+    https://api.notion.com/v1)              printf 'GET%s/users/me%s' "$us" "$us" ;;
+    https://api.linear.app)                 printf 'POST%s/graphql%s{"query":"{ viewer { id } }"}' "$us" "$us" ;;
+    https://api.airtable.com)               printf 'GET%s/v0/meta/whoami%s' "$us" "$us" ;;
+    https://us.posthog.com|https://eu.posthog.com) printf 'GET%s/api/users/@me/%s' "$us" "$us" ;;
+    https://api.clickup.com/api/v2)         printf 'GET%s/user%s' "$us" "$us" ;;
+    https://api.mailgun.net/v3|https://api.eu.mailgun.net/v3) printf 'GET%s/domains?limit=1%s' "$us" "$us" ;;
+    https://api.openai.com)                 printf 'GET%s/v1/models%s' "$us" "$us" ;;
+    https://api.openai.com/v1)              printf 'GET%s/models%s' "$us" "$us" ;;
+    https://api.anthropic.com)              printf 'GET%s/v1/models%s' "$us" "$us" ;;
+    https://api.stripe.com)                 printf 'GET%s/v1/balance%s' "$us" "$us" ;;
+    https://api.apify.com/v2)               printf 'GET%s/users/me%s' "$us" "$us" ;;
+    # /user/tokens/verify rejects account-owned tokens that work fine; /accounts takes both.
+    https://api.cloudflare.com/client/v4)   printf 'GET%s/accounts?per_page=1%s' "$us" "$us" ;;
+    https://*.grafana.net/api)              printf 'GET%s/user%s' "$us" "$us" ;;
+    https://api.telegram.org/bot*)          printf 'GET%s/getMe%s' "$us" "$us" ;;   # token lives in the host
+    */api/v1) case "$h" in *:5678/*|*n8n*)  printf 'GET%s/workflows?limit=1%s' "$us" "$us" ;; esac ;;
+  esac
+}
+
+# doctor_probe <svc> <auth> <host> <check> <check_body> — prints one state line.
+# Never prints a token or a response body: only HTTP codes and short enum
+# error strings that pass a strict charset filter.
+doctor_probe() {
+  local svc=$1 auth=$2 host=$3 check=$4 check_body=$5 method=GET spec out rc code body err
+  local us=$'\x1f'
+  case "$check" in
+    off|none|false) [ "$auth" = none ] && echo "ok (no auth)" || echo "ok (present; check disabled)"; return ;;
+  esac
+  if [ -n "$check" ]; then
+    [ -n "$check_body" ] && method=POST
+  else
+    spec=$(builtin_check "$host")
+    if [ -z "$spec" ]; then
+      [ "$auth" = none ] && { echo "ok (no auth)"; return; }
+      echo "present, unverified — set services.$svc.check to an authenticated path"; return
+    fi
+    method=${spec%%"$us"*}; spec=${spec#*"$us"}
+    check=${spec%%"$us"*};  check_body=${spec#*"$us"}
+  fi
+  $doctor_offline && { echo "present (not checked: --offline)"; return; }
+
+  local args=(-o - -w '\n__CURLY_HTTP__%{http_code}' --max-time "${CURLY_DOCTOR_TIMEOUT:-8}")
+  [ "$method" = POST ] && args+=(-X POST -d "$check_body")
+  # Re-enter curly itself so auth, headers and the host-override guard are exactly
+  # what a real request gets — no second copy of the auth logic to drift.
+  rc=0
+  out=$("$BASH" "$CURLY_SELF" "$svc" "$check" "${args[@]}" 2>&1) || rc=$?
+  case "$out" in
+    *__CURLY_HTTP__*) code=${out##*__CURLY_HTTP__}; body=${out%__CURLY_HTTP__*} ;;
+    *) code="" body="" ;;
+  esac
+
+  if [ -z "$code" ] || [ "$code" = 000 ]; then
+    case "$out" in *"refusing '$svc'"*) echo "REFUSED — host override inherits token (run: curly $svc / to see why)"; return ;; esac
+    case "$rc" in
+      6)  echo "unreachable — DNS lookup failed" ;;
+      7)  echo "unreachable — connection refused" ;;
+      28) echo "unreachable — timed out after ${CURLY_DOCTOR_TIMEOUT:-8}s" ;;
+      *)  echo "unreachable — curl exit $rc" ;;
+    esac
+    return
+  fi
+
+  case "$code" in
+    2??)
+      # Slack-shaped APIs answer 200 with {"ok":false,"error":"invalid_auth"}.
+      err=$(jq -r 'if type == "object" and .ok == false then (.error // "rejected") else empty end' <<<"$body" 2>/dev/null || true)
+      if [ -n "$err" ] && ! [[ "$err" =~ ^[a-z_]{1,40}$ ]]; then err=rejected; fi
+      case "$err" in
+        "")                echo "ok (verified: $method $check → $code)" ;;
+        token_expired)     echo "EXPIRED — $err" ;;
+        invalid_auth|not_authed|token_revoked|account_inactive|rejected) echo "INVALID — $err" ;;
+        *)                 echo "unverified — $method $check said $err" ;;
+      esac ;;
+    401)  echo "INVALID — rejected (HTTP 401): expired, revoked, or wrong token" ;;
+    403)  echo "REJECTED — HTTP 403 on $check: expired/revoked, or lacks scope for that path" ;;
+    404)  echo "unverified — HTTP 404 on $check (check path wrong? set services.$svc.check)" ;;
+    429)  echo "unverified — rate limited (HTTP 429)" ;;
+    *)    echo "unverified — HTTP $code on $check" ;;
+  esac
 }
 
 # ─── Subcommands ────────────────────────────────────────────────────────────
@@ -262,6 +363,12 @@ case "${1:-}" in
     exit 0 ;;
 
   doctor)
+    doctor_offline=false
+    case "${2:-}" in
+      "") ;;
+      --offline) doctor_offline=true ;;
+      *) echo "curly doctor [--offline]" >&2; exit 1 ;;
+    esac
     for d in curl yq jq; do
       command -v "$d" >/dev/null || { echo "✗ $d missing (brew install $d)"; exit 1; }
     done
@@ -294,16 +401,28 @@ case "${1:-}" in
     [ "$doctor_bad" = "1" ] && exit 1
     build_config
     echo
-    while IFS=$'\t' read -r svc auth token; do
+    $doctor_offline && echo "  (--offline: token presence only, not validity)"
+    # \x1f, not \t: tab is IFS whitespace, so `read` collapses empty fields and shifts columns.
+    while IFS=$'\x1f' read -r svc auth token host check check_body; do
       tok=$(expand "$token")
+      missing=0
       case "$auth" in
-        none)  state="ok" ;;
-        basic) case "$tok" in ""|:*|*:) state="MISSING TOKEN — set services.$svc.token in your curly config" ;; *) state="ok" ;; esac ;;
-        *)     [ -z "$tok" ] && state="MISSING TOKEN — set services.$svc.token in your curly config" || state="ok" ;;
+        none)  ;;
+        basic) case "$tok" in ""|:*|*:) missing=1 ;; esac ;;
+        *)     [ -z "$tok" ] && missing=1 ;;
       esac
+      if [ "$missing" = 1 ]; then
+        state="MISSING TOKEN — set services.$svc.token in your curly config"
+      else
+        state=$(doctor_probe "$svc" "$auth" "$(expand "$host")" "$check" "$check_body")
+      fi
+      case "$state" in INVALID*|EXPIRED*|REJECTED*|REFUSED*) doctor_bad=1 ;; esac
       printf "  %-12s %-7s %s\n" "$svc" "$auth" "$state"
     done < <(jq -r '.services // {} | to_entries[] |
-      .key + "\t" + (.value.auth // "none") + "\t" + (.value.token // "")' <<<"$CONFIG")
+      [.key, (.value.auth // "none"), (.value.token // ""), (.value.host // ""),
+       (if .value.check == false then "off" else (.value.check // "" | tostring) end),
+       (.value.check_body // "" | if type == "string" then . else tojson end)] | join("\u001f")' <<<"$CONFIG")
+    [ "$doctor_bad" = "1" ] && exit 1
     exit 0 ;;
 esac
 

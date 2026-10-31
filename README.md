@@ -67,10 +67,35 @@ curly init gh             # then paste your GitHub PAT
 curly init stripe host=https://api.stripe.com auth=bearer
 # (curly then prompts for the token)
 
-curly doctor              # verifies deps, perms, and .gitignore hygiene
+curly doctor              # verifies deps, perms, .gitignore hygiene, and that each token WORKS
+curly doctor --offline    # same, but token presence only (no network)
 ```
 
 `curly doctor` will error out if `.curly.yaml` is tracked by git (rotate immediately) and warn if a repo-local `.curly.yaml` isn't covered by `.gitignore`.
+
+**Token validity.** A token that is present is not a token that works. Doctor makes one cheap authenticated call per service and reports what came back. It never prints a token or a response body.
+
+```
+  protocol     bearer  ok (verified: GET /impulse/mine?limit=1 → 200)
+  slack        bearer  INVALID — invalid_auth
+  openai       bearer  INVALID — rejected (HTTP 401): expired, revoked, or wrong token
+  gh           bearer  MISSING TOKEN — set services.gh.token in your curly config
+  myapi        bearer  present, unverified — set services.myapi.check to an authenticated path
+```
+
+Known hosts (protocol, GitHub, Slack, Notion, Linear, Airtable, PostHog, ClickUp, Mailgun, OpenAI, Anthropic, Stripe, Apify, Cloudflare, Grafana Cloud, Telegram, n8n) have a built-in probe. For anything else, name a path that **requires** auth. A public path answers 200 to any token, so it proves nothing:
+
+```yaml
+  myapi:
+    host: https://api.example.com
+    auth: bearer
+    token: ...
+    check: /v1/me                        # GET; must need auth
+    # check_body: '{"query":"{ me }"}'   # set this to POST instead
+    # check: false                       # skip the probe for this service
+```
+
+Doctor exits 1 when any token reads `INVALID`, `EXPIRED`, `REJECTED` (403), or `REFUSED` (host-override guard). Unreachable hosts, 404s, 429s, and 5xx read `unverified`, not invalid. `CURLY_DOCTOR_TIMEOUT` sets the per-probe timeout (default 8s).
 
 ---
 
@@ -185,9 +210,10 @@ echo '.curly.yaml' >> ~/.gitignore_global
 
 **No `eval` on config values.** `${VAR}` and `${VAR:-default}` expand via bash indirection (`${!name-}`), not `eval`. Anything else in a YAML value — backticks, `$(…)`, stray quotes — passes through as literal text and cannot execute code.
 
+**Token stays out of argv.** Credentials and config headers reach curl as a `-K` config through an in-memory process-substitution pipe, never as `-H` arguments, so `ps aux` and `/proc/<pid>/cmdline` don't show them.
+
 What `curly` does NOT protect against:
 
-- **`ps aux` leak.** While a request is in flight, the full bearer token shows up in the process list (it's a curl argument). Anyone else on the same machine — including processes running as your user — can grep for it. Same risk as raw curl. If this matters for your threat model, curl supports `-H @file` to read headers from disk; `curly` doesn't use that today.
 - **Backups / Time Machine.** If `~/.curly.yaml` is in your backup set, the tokens go with it. Exclude the file if that matters.
 
 What `curly` does protect against:
