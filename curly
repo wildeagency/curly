@@ -330,8 +330,10 @@ case "${1:-}" in
       CUR=$(yq -r ".services.\"$SERVICE\".token // \"\"" "$YAML")
       if [ -z "$CUR" ] || [ "${CUR#*xxxxx}" != "$CUR" ]; then
         if [ -t 0 ] && [ -t 1 ]; then
-          printf 'Token for %s (input hidden, blank to skip): ' "$SERVICE" >&2
+          # Echo off BEFORE the prompt shows, so a paste that lands the instant
+          # the prompt appears is never echoed.
           stty -echo 2>/dev/null || true
+          printf 'Token for %s (input hidden, blank to skip): ' "$SERVICE" >&2
           IFS= read -r INIT_TOKEN || true
           stty echo 2>/dev/null || true
           printf '\n' >&2

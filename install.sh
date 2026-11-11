@@ -1,19 +1,24 @@
 #!/usr/bin/env sh
-# curly install.sh — one-shot installer.
+# curly install.sh: one-shot installer.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/wildeagency/curly/main/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- protocol tok_xxx
-#   curl -fsSL .../install.sh | sh -s -- protocol tok_xxx ghost-user=user_xxx
+# Usage. Fetch it, read it, then run it. Don't pipe it into sh.
+#   curl -fsSLo curly-install.sh https://raw.githubusercontent.com/wildeagency/curly/main/install.sh
+#   less curly-install.sh
+#   sh curly-install.sh protocol            # install, then set up protocol.supply
+#   sh curly-install.sh                     # install only
+#   sh curly-install.sh protocol ghost-user=user_xxx
 #
-# Any trailing args after `sh -s --` are passed verbatim to `curly init` after
-# install. So `... | sh -s -- <service> <token> [key=value ...]` finishes the
-# whole setup in one command.
+# The optional trailing args are `<service> [key=value ...]` and go to
+# `curly init`. That command prompts for the token with input hidden. A token
+# is never an argument here: argv lands in shell history and `ps`. A bare
+# second argument (no `=`) is refused for that reason.
 #
 # Env vars (override defaults):
 #   PREFIX        Install dir for the curly binary (default: ~/.local/bin)
 #   REPO          GitHub repo (default: wildeagency/curly)
 #   BRANCH        Git branch / tag (default: main)
+#   RAW           Base URL the binary is fetched from (default: built from REPO
+#                 and BRANCH; file:// works, for testing a checkout)
 #   NO_PATH=1     Skip adding $PREFIX to PATH in shell rc
 
 set -eu
@@ -22,13 +27,28 @@ REPO="${REPO:-wildeagency/curly}"
 BRANCH="${BRANCH:-main}"
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 NO_PATH="${NO_PATH:-0}"
-RAW="https://raw.githubusercontent.com/$REPO/$BRANCH"
+RAW="${RAW:-https://raw.githubusercontent.com/$REPO/$BRANCH}"
 
 say() { printf '%s\n' "$*"; }
 ok()  { printf '✓ %s\n' "$*"; }
 warn(){ printf '! %s\n' "$*" >&2; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
 have(){ command -v "$1" >/dev/null 2>&1; }
+
+# ─── 0. Validate args before touching anything ──────────────────────────────
+SERVICE="${1:-}"
+if [ -n "$SERVICE" ]; then
+  case "$SERVICE" in
+    *[!a-zA-Z0-9_-]*) die "bad service name '$SERVICE' (usage: sh install.sh [service [key=value ...]])" ;;
+  esac
+  shift
+  for a in "$@"; do
+    case "$a" in
+      *=*) ;;
+      *) die "'$SERVICE' takes key=value extras only. A bare value looks like a token, and tokens never go on the command line. curly will prompt for it with input hidden." ;;
+    esac
+  done
+fi
 
 # ─── 1. Dependency check ────────────────────────────────────────────────────
 missing=
@@ -58,6 +78,7 @@ curl -fsSL "$RAW/curly" -o "$TMP" || die "download failed: $RAW/curly"
 chmod +x "$TMP"
 mv "$TMP" "$PREFIX/curly"
 ok "installed: $PREFIX/curly"
+CURLY="$PREFIX/curly"
 
 # ─── 3. PATH wiring ─────────────────────────────────────────────────────────
 case ":${PATH:-}:" in
@@ -73,6 +94,7 @@ if [ "$on_path" -eq 0 ] && [ "$NO_PATH" != "1" ]; then
     if ! grep -qF "$PREFIX" "$rc"; then
       {
         printf '\n%s\n' "$marker"
+        # shellcheck disable=SC2016  # $PATH must stay literal in the rc file
         printf 'export PATH="%s:$PATH"\n' "$PREFIX"
       } >> "$rc"
       ok "PATH wired in $rc"
@@ -84,26 +106,34 @@ if [ "$on_path" -eq 0 ] && [ "$NO_PATH" != "1" ]; then
   fi
 fi
 
-# ─── 4. Starter YAML (only if absent) ───────────────────────────────────────
-YAML="${CURLY_YAML:-$HOME/.curly.yaml}"
-if [ ! -f "$YAML" ]; then
-  curl -fsSL "$RAW/examples/curly.yaml" -o "$YAML" || die "download failed: $RAW/examples/curly.yaml"
-  chmod 600 "$YAML"
-  ok "wrote starter $YAML (chmod 600)"
-else
-  ok "kept existing $YAML"
-fi
-
-# ─── 5. Hand off to `curly init` if positional args were supplied ───────────
-CURLY="$PREFIX/curly"
-if [ $# -gt 0 ]; then
+# ─── 4. Configure the named service (hidden token prompt) ───────────────────
+# No starter YAML: `curly init` creates ~/.curly.yaml at chmod 600 with only
+# the services you name. A template full of placeholders sends junk headers.
+INIT_RAN=0
+if [ -n "$SERVICE" ]; then
   say
-  say "→ curly init $*"
-  "$CURLY" init "$@"
+  if [ "$SERVICE" = protocol ]; then
+    say "Get a token: sign in at https://protocol.supply/api-keys → New key, then copy it."
+  fi
+  say "→ curly init $SERVICE${1:+ $*}"
+  if [ -t 0 ] && [ -t 1 ]; then
+    "$CURLY" init "$SERVICE" "$@" && INIT_RAN=1
+  elif [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
+    # stdin is not a terminal (piped in?): read the hidden prompt from the tty.
+    "$CURLY" init "$SERVICE" "$@" </dev/tty && INIT_RAN=1
+  else
+    warn "No terminal to prompt on. Run this yourself, in a terminal you control:"
+    warn "  curly init $SERVICE${1:+ $*}"
+  fi
 fi
 
-# ─── 6. Doctor ──────────────────────────────────────────────────────────────
+# ─── 5. Doctor ──────────────────────────────────────────────────────────────
 say
 "$CURLY" doctor || true
 say
-say "Try:  curly protocol bootstrap"
+if [ "$SERVICE" = protocol ] && [ "$INIT_RAN" -eq 1 ]; then
+  say "Try:   curly protocol bootstrap"
+  say "Next:  wire your agent. See https://protocol.supply/@protocol/onboarding"
+elif [ -z "$SERVICE" ]; then
+  say "Next:  curly init <service>   (e.g. curly init protocol; it prompts for the token, hidden)"
+fi

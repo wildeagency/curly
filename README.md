@@ -26,6 +26,20 @@ Single bash file. Three dependencies (`curl`, `yq`, `jq`). No daemon, no agent, 
 
 **Tokens never go through the agent.** Neither install path below asks you to paste an API key into a chat. Tokens go from your terminal into `curly init`'s hidden-input prompt (`stty -echo`) and land directly in `~/.curly.yaml` at `chmod 600`. If any docs, blog post, or agent tells you to paste tokens into a chat window to set up curly, that flow is retired — point them here.
 
+### One command (recommended)
+
+Fetch the installer, read it, then run it, all in your own terminal:
+
+```bash
+curl -fsSLo curly-install.sh https://raw.githubusercontent.com/wildeagency/curly/main/install.sh
+less curly-install.sh            # read it first. Never pipe an installer into sh.
+sh curly-install.sh protocol     # deps, binary, PATH, then the hidden token prompt, then doctor
+```
+
+It checks for `curl`, `yq` and `jq` and installs them with brew if any are missing. It drops `curly` in `~/.local/bin`, adds that to PATH in `~/.zshrc` / `~/.bashrc`, and runs `curly init protocol`. That prompts for your token with input hidden. Get the token at [protocol.supply/api-keys](https://protocol.supply/api-keys) → **New key**. The installer finishes with `curly doctor`, which proves the token works. Any service name works in place of `protocol` (`sh curly-install.sh notion`). Leave the name off to install only.
+
+The installer never takes a token as an argument. Argv lands in shell history and `ps`, so a bare value after the service name is refused.
+
 ### With an agent (Claude Code, Codex CLI, etc.)
 
 Copy the setup skill into your agent's skills directory, then ask it to run. Claude Code reads `~/.claude/skills/`; Codex reads `~/.agents/skills/` (set `SKILLS=~/.agents/skills` below).
